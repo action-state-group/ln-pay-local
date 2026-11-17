@@ -232,8 +232,15 @@ async fn pay(dir: &Path, bolt11: &str, max_fee_msat: u64) -> Result<String> {
         created_at: submitted.created_at,
         id: parsed.payment_id(),
     };
-    let (status, fee) = match o.wallet.wait_for_payment(index, Some(SETTLE_TIMEOUT)).await {
-        Ok(p) => (
+    // The SDK checks its deadline only between requests, so a request that starts near the deadline could run past it
+    // while this process holds the wallet lock: bound the whole wait.
+    let waited = tokio::time::timeout(
+        SETTLE_TIMEOUT,
+        o.wallet.wait_for_payment(index, Some(SETTLE_TIMEOUT)),
+    )
+    .await;
+    let (status, fee) = match waited {
+        Ok(Ok(p)) => (
             match p.status {
                 PaymentStatus::Completed => "succeeded",
                 PaymentStatus::Failed => "failed",
@@ -241,7 +248,7 @@ async fn pay(dir: &Path, bolt11: &str, max_fee_msat: u64) -> Result<String> {
             },
             p.fees.msat(),
         ),
-        Err(_) => ("pending", route.fees.msat()),
+        Ok(Err(_)) | Err(_) => ("pending", route.fees.msat()),
     };
     Ok(format!(
         "{{\"status\": \"{status}\", \"amount_msat\": {amount}, \"fee_msat\": {fee}, \"payment_hash\": \"{hash}\"}}"
