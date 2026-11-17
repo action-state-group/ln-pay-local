@@ -6,7 +6,7 @@ payment on one machine; it is also a usable example of the Lexe Rust SDK.
 
 > **Real money, example software.** It talks to Lexe's mainnet. Use small amounts and wallets you made for this. It is
 > example code: not audited, no warranty (Apache-2.0), and unofficial, not affiliated with Lexe. Each wallet
-> directory holds the wallet's seed in `seedphrase.txt` as an unencrypted file (mode 0600): anyone who has the file
+> directory holds the wallet's seed in `seedphrase.txt` as an unencrypted file (mode 0600 on Unix): anyone who has the file
 > controls the funds. Back it up, keep wallet directories outside any repository, never share the file. Whether a seed
 > restores a wallet is Lexe's matter, not this program's.
 
@@ -68,14 +68,15 @@ ln-pay-local pay "$INV" --wallet ~/wallets/buyer
 ```
 
 How much a new Lexe wallet needs for its first receive, and what Lexe charges for that, is Lexe's to say: look up its
-current minimums and fees and choose `<amount>` accordingly. These steps have not been run end to end on a fresh
-pair of wallets by the author.
+current minimums and fees and choose `<amount>` accordingly. The two-wallet payment below has not been run end to end on
+a fresh pair of wallets yet.
 
-## Use in the evidencebook ARD demo
+## Planned use in the evidencebook ARD demo
 
-The [ARD two-seller demo](https://github.com/action-state-group/evidencebook/tree/main/python/examples/ard-commerce)
-has a `local` payment rail that calls this program: set `ARD_PAY_LOCAL` to the binary, `ARD_WALLET_BUYER` and
-`ARD_WALLET_SELLER` to two wallet directories, and run the demo with `--rail local`.
+[evidencebook#483](https://github.com/action-state-group/evidencebook/pull/483) (open, not merged) adds a `local`
+payment rail to the ARD two-seller demo that will call this program: `ARD_PAY_LOCAL` for the binary,
+`ARD_WALLET_BUYER` and `ARD_WALLET_SELLER` for two wallet directories, and `--rail local`. Until it merges, the demo
+on `main` has no such rail.
 
 ## License
 
