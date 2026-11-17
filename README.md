@@ -13,6 +13,7 @@ payment on one machine; it is also a usable example of the Lexe Rust SDK.
 ```text
 ln-pay-local init    --wallet <dir>                          make a new wallet (or finish provisioning one)
 ln-pay-local balance --wallet <dir>                          spendable Lightning balance, in msat
+ln-pay-local payments --wallet <dir> [--limit <n>]            the newest payments (read-only): direction, status, amount, fee, time, payment hash
 ln-pay-local invoice <msat> --wallet <dir>                   an invoice for exactly <msat>, to receive a payment
 ln-pay-local pay <bolt11> --wallet <dir> [--max-fee-msat <n>]  pay an invoice (default fee cap: 1000 msat)
 ```
@@ -39,6 +40,8 @@ $ ln-pay-local pay lnbc2890p1... --wallet ~/wallets/buyer
   `payment_hash`: look the payment up in the Lexe app (or with the Lexe SDK) before paying again. Paying the same
   invoice again is refused by Lexe's preflight when this wallet already tried it. If Lexe's answer to the submit
   itself is uncertain it says so and exits 1.
+- `payments` only reads: it syncs the wallet's payment list and prints it. It never prints a preimage. Use it to see
+  that a receive landed (`inbound`, `succeeded`) and what it cost.
 - A wallet directory is locked while a command runs (`wallet.lock`); a second process on the same directory is
   refused. Lexe's local cache is not a multi-process ledger, so do not point two programs at one wallet.
 - It is mainnet only and keeps no state of its own beyond what the Lexe SDK writes in the wallet directory.

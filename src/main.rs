@@ -6,6 +6,7 @@
 //! ln-pay-local invoice <msat> --wallet <dir>
 //! ln-pay-local pay <bolt11> --wallet <dir> [--max-fee-msat <n>]
 //! ln-pay-local balance --wallet <dir>
+//! ln-pay-local payments --wallet <dir> [--limit <n>]
 //! ```
 //!
 //! Each command prints one JSON object and exits 0, or prints `{"error": "..."}` on stderr and exits 1.
@@ -26,7 +27,9 @@ use lexe::config::WalletEnvConfig;
 use lexe::types::auth::{CredentialsRef, RootSeed};
 use lexe::types::bitcoin::Amount;
 use lexe::types::command::CreateInvoiceRequest;
-use lexe::types::payment::{PaymentCreatedIndex, PaymentKind, PaymentStatus};
+use lexe::types::payment::{
+    PaymentCreatedIndex, PaymentDirection, PaymentFilter, PaymentKind, PaymentStatus,
+};
 use lexe::wallet::LexeWallet;
 use lexe_api_core::def::UserNodeRunApi;
 use lexe_api_core::models::command::{PayInvoicePreflightRequest, PayInvoiceRequest};
@@ -145,6 +148,52 @@ async fn balance(dir: &Path) -> Result<String> {
     ))
 }
 
+/// The wallet's newest payments, read-only: direction, status, amount, fee, time and payment hash. The preimage
+/// (proof of payment, a secret for inbound payments) is never printed.
+async fn payments(dir: &Path, limit: usize) -> Result<String> {
+    ensure!(
+        (1..=200).contains(&limit),
+        "the limit must be between 1 and 200"
+    );
+    let o = open(dir)?;
+    o.wallet
+        .sync_payments()
+        .await
+        .map_err(|_| anyhow::anyhow!("Lexe payment synchronization failed"))?;
+    let listed = o
+        .wallet
+        .list_payments(&PaymentFilter::All, None, Some(limit), None)
+        .map_err(|_| anyhow::anyhow!("Lexe payment query failed"))?;
+    let rows: Vec<String> = listed
+        .payments
+        .iter()
+        .map(|p| {
+            let direction = match p.direction {
+                PaymentDirection::Inbound => "inbound",
+                PaymentDirection::Outbound => "outbound",
+                PaymentDirection::Info => "info",
+            };
+            let status = match p.status {
+                PaymentStatus::Completed => "succeeded",
+                PaymentStatus::Failed => "failed",
+                PaymentStatus::Pending => "pending",
+            };
+            let amount = p
+                .amount
+                .map_or("null".to_string(), |a| a.msat().to_string());
+            let hash = p
+                .hash
+                .map_or("null".to_string(), |h| format!("\"{h}\""));
+            format!(
+                "{{\"direction\": \"{direction}\", \"status\": \"{status}\", \"amount_msat\": {amount}, \"fee_msat\": {}, \"created_at_ms\": {}, \"payment_hash\": {hash}}}",
+                p.fees.msat(),
+                p.created_at.to_millis()
+            )
+        })
+        .collect();
+    Ok(format!("{{\"payments\": [{}]}}", rows.join(", ")))
+}
+
 async fn invoice(dir: &Path, amount_msat: u64) -> Result<String> {
     ensure!(amount_msat > 0, "the amount must be more than zero");
     let o = open(dir)?;
@@ -257,7 +306,7 @@ async fn pay(dir: &Path, bolt11: &str, max_fee_msat: u64) -> Result<String> {
 
 fn usage() -> anyhow::Error {
     anyhow::anyhow!(
-        "usage: ln-pay-local init --wallet <dir> | invoice <msat> --wallet <dir> | pay <bolt11> --wallet <dir> [--max-fee-msat <n>] | balance --wallet <dir>"
+        "usage: ln-pay-local init --wallet <dir> | invoice <msat> --wallet <dir> | pay <bolt11> --wallet <dir> [--max-fee-msat <n>] | balance --wallet <dir> | payments --wallet <dir> [--limit <n>]"
     )
 }
 
@@ -296,6 +345,7 @@ async fn run(args: &[String]) -> Result<String> {
     let mut positional = Vec::new();
     let mut wallet: Option<PathBuf> = None;
     let mut max_fee = DEFAULT_MAX_FEE_MSAT;
+    let mut limit = 20usize;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -303,6 +353,7 @@ async fn run(args: &[String]) -> Result<String> {
             "--max-fee-msat" => {
                 max_fee = it.next().ok_or_else(usage)?.parse().map_err(|_| usage())?
             }
+            "--limit" => limit = it.next().ok_or_else(usage)?.parse().map_err(|_| usage())?,
             _ => positional.push(a.clone()),
         }
     }
@@ -310,6 +361,7 @@ async fn run(args: &[String]) -> Result<String> {
     match positional.as_slice() {
         [c] if c == "init" => init(&dir).await,
         [c] if c == "balance" => balance(&dir).await,
+        [c] if c == "payments" => payments(&dir, limit).await,
         [c, n] if c == "invoice" => invoice(&dir, n.parse().map_err(|_| usage())?).await,
         [c, b] if c == "pay" => pay(&dir, b, max_fee).await,
         _ => Err(usage()),
@@ -427,5 +479,26 @@ mod tests {
                 .to_string()
                 .contains("usage")
         );
+    }
+
+    #[tokio::test]
+    async fn payments_limits_are_checked_before_any_wallet_is_opened() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let zero = run(&args(&[
+            "payments",
+            "--wallet",
+            "/nonexistent",
+            "--limit",
+            "0",
+        ]))
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(zero.contains("between 1 and 200"), "{zero}");
+        let missing = run(&args(&["payments", "--wallet", "/nonexistent"]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("does not exist"), "{missing}");
     }
 }
