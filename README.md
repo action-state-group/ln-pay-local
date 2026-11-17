@@ -13,7 +13,7 @@ payment on one machine; it is also a usable example of the Lexe Rust SDK.
 ```text
 ln-pay-local init    --wallet <dir>                          make a new wallet (or finish provisioning one)
 ln-pay-local balance --wallet <dir>                          spendable Lightning balance, in msat
-ln-pay-local payments --wallet <dir> [--limit <n>]            the newest payments (read-only): direction, status, amount, fee, time, payment hash
+ln-pay-local payments --wallet <dir> [--limit <n>]            the newest payments (read-only; default 20, at most 200; `more` is true if older ones exist)
 ln-pay-local invoice <msat> --wallet <dir>                   an invoice for exactly <msat>, to receive a payment
 ln-pay-local pay <bolt11> --wallet <dir> [--max-fee-msat <n>]  pay an invoice (default fee cap: 1000 msat)
 ```
@@ -30,15 +30,15 @@ $ ln-pay-local pay lnbc2890p1... --wallet ~/wallets/buyer
 ## What it does and does not do
 
 - `init` is the only command that creates a wallet. With no seed in the directory it makes one (the SDK writes the
-  seed, mode 0600; the program never prints, copies or logs it) and provisions it with Lexe. With a seed already
+  seed, mode 0600 on Unix; the program never prints, copies or logs it) and provisions it with Lexe. With a seed already
   there it keeps that seed and only repeats the provisioning, which the SDK makes idempotent, so an `init` that was
   cut short can be run again. Every other command opens an existing wallet and refuses a directory without
   `seedphrase.txt`, so a wrong path never makes a new wallet.
 - `pay` asks Lexe for the route first and refuses a route whose amount is not exactly the invoice's or whose fee is
   over `--max-fee-msat`, then pays and waits (up to 90 s) for that payment to settle. It reports `succeeded` or
   `failed`; a payment that was submitted but not seen to settle in time is reported `pending` with its
-  `payment_hash`: look the payment up in the Lexe app (or with the Lexe SDK) before paying again. Paying the same
-  invoice again is refused by Lexe's preflight when this wallet already tried it. If Lexe's answer to the submit
+  `payment_hash`: look the payment up in the Lexe app (or with the Lexe SDK) before paying again. Lexe may refuse to pay
+  an invoice this wallet already tried (the mesh-llm wallet plugin notes its preflight does), but do not rely on that. If Lexe's answer to the submit
   itself is uncertain it says so and exits 1.
 - `payments` only reads: it syncs the wallet's payment list and prints it. It never prints a preimage. Use it to see
   that a receive landed (`inbound`, `succeeded`) and what it cost.
@@ -71,8 +71,8 @@ ln-pay-local pay "$INV" --wallet ~/wallets/buyer
 ```
 
 How much a new Lexe wallet needs for its first receive, and what Lexe charges for that, is Lexe's to say: look up its
-current minimums and fees and choose `<amount>` accordingly. The two-wallet payment above has not been run end to end on
-a fresh pair of wallets yet.
+current minimums and fees and choose `<amount>` accordingly. The two-wallet payment above was run once end to end on 2026-11-17
+between two fresh wallets (289 msat, receipt shown with `payments`); it has not been tested beyond that.
 
 ## Planned use in the evidencebook ARD demo
 

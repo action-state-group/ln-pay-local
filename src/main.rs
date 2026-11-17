@@ -164,34 +164,56 @@ async fn payments(dir: &Path, limit: usize) -> Result<String> {
         .wallet
         .list_payments(&PaymentFilter::All, None, Some(limit), None)
         .map_err(|_| anyhow::anyhow!("Lexe payment query failed"))?;
-    let rows: Vec<String> = listed
+    let rows: Vec<Row> = listed
         .payments
         .iter()
-        .map(|p| {
-            let direction = match p.direction {
+        .map(|p| Row {
+            direction: match p.direction {
                 PaymentDirection::Inbound => "inbound",
                 PaymentDirection::Outbound => "outbound",
                 PaymentDirection::Info => "info",
-            };
-            let status = match p.status {
+            },
+            status: match p.status {
                 PaymentStatus::Completed => "succeeded",
                 PaymentStatus::Failed => "failed",
                 PaymentStatus::Pending => "pending",
-            };
-            let amount = p
-                .amount
-                .map_or("null".to_string(), |a| a.msat().to_string());
-            let hash = p
-                .hash
-                .map_or("null".to_string(), |h| format!("\"{h}\""));
+            },
+            amount_msat: p.amount.map(|a| a.msat()),
+            fee_msat: p.fees.msat(),
+            created_at_ms: p.created_at.to_millis(),
+            payment_hash: p.hash.map(|h| h.to_string()),
+        })
+        .collect();
+    Ok(format_payments(&rows, listed.next_index.is_some()))
+}
+
+/// What one payment shows: the only fields the command prints. There is no preimage here by construction.
+struct Row {
+    direction: &'static str,
+    status: &'static str,
+    amount_msat: Option<u64>,
+    fee_msat: u64,
+    created_at_ms: u64,
+    payment_hash: Option<String>,
+}
+
+/// The JSON object for a list of rows; `more` says older payments exist beyond the limit.
+fn format_payments(rows: &[Row], more: bool) -> String {
+    let rows: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let amount = r.amount_msat.map_or("null".to_string(), |a| a.to_string());
+            let hash = r
+                .payment_hash
+                .as_ref()
+                .map_or("null".to_string(), |h| json_string(h));
             format!(
-                "{{\"direction\": \"{direction}\", \"status\": \"{status}\", \"amount_msat\": {amount}, \"fee_msat\": {}, \"created_at_ms\": {}, \"payment_hash\": {hash}}}",
-                p.fees.msat(),
-                p.created_at.to_millis()
+                "{{\"direction\": \"{}\", \"status\": \"{}\", \"amount_msat\": {amount}, \"fee_msat\": {}, \"created_at_ms\": {}, \"payment_hash\": {hash}}}",
+                r.direction, r.status, r.fee_msat, r.created_at_ms
             )
         })
         .collect();
-    Ok(format!("{{\"payments\": [{}]}}", rows.join(", ")))
+    format!("{{\"payments\": [{}], \"more\": {more}}}", rows.join(", "))
 }
 
 async fn invoice(dir: &Path, amount_msat: u64) -> Result<String> {
@@ -500,5 +522,38 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(missing.contains("does not exist"), "{missing}");
+    }
+
+    #[test]
+    fn payments_output_has_only_the_allowed_fields_and_keeps_statuses_and_nulls() {
+        let row = |direction, status, amount_msat, hash: Option<&str>| Row {
+            direction,
+            status,
+            amount_msat,
+            fee_msat: 100,
+            created_at_ms: 1_700_000_000_000,
+            payment_hash: hash.map(str::to_string),
+        };
+        assert_eq!(
+            format_payments(&[], false),
+            "{\"payments\": [], \"more\": false}"
+        );
+        let out = format_payments(
+            &[
+                row("inbound", "succeeded", Some(189), Some("ab12")),
+                row("outbound", "pending", Some(289), Some("cd34")),
+                row("inbound", "failed", None, None),
+            ],
+            true,
+        );
+        let expected = concat!(
+            "{\"payments\": [",
+            "{\"direction\": \"inbound\", \"status\": \"succeeded\", \"amount_msat\": 189, \"fee_msat\": 100, \"created_at_ms\": 1700000000000, \"payment_hash\": \"ab12\"}, ",
+            "{\"direction\": \"outbound\", \"status\": \"pending\", \"amount_msat\": 289, \"fee_msat\": 100, \"created_at_ms\": 1700000000000, \"payment_hash\": \"cd34\"}, ",
+            "{\"direction\": \"inbound\", \"status\": \"failed\", \"amount_msat\": null, \"fee_msat\": 100, \"created_at_ms\": 1700000000000, \"payment_hash\": null}",
+            "], \"more\": true}"
+        );
+        assert_eq!(out, expected);
+        assert!(!out.contains("preimage"));
     }
 }
