@@ -68,7 +68,7 @@ ln-pay-local pay "$INV" --wallet ~/wallets/buyer
 ```
 
 How much a new Lexe wallet needs for its first receive, and what Lexe charges for that, is Lexe's to say: look up its
-current minimums and fees and choose `<amount>` accordingly. The two-wallet payment below has not been run end to end on
+current minimums and fees and choose `<amount>` accordingly. The two-wallet payment above has not been run end to end on
 a fresh pair of wallets yet.
 
 ## Planned use in the evidencebook ARD demo
