@@ -38,7 +38,7 @@ $ ln-pay-local pay lnbc2890p1... --wallet ~/wallets/buyer
   over `--max-fee-msat`, then pays and waits (up to 90 s) for that payment to settle. It reports `succeeded` or
   `failed`; a payment that was submitted but not seen to settle in time is reported `pending` with its
   `payment_hash`: look the payment up in the Lexe app (or with the Lexe SDK) before paying again. Lexe may refuse to pay
-  an invoice this wallet already tried (the mesh-llm wallet plugin notes its preflight does), but do not rely on that. If Lexe's answer to the submit
+  an invoice this wallet already tried (the [mesh-llm wallet plugin notes its preflight does](https://github.com/Mesh-LLM/lexe-wallet-plugin/blob/5323f3374699a31dfb15734cd52639c0ebbe3f9b/src/lexe.rs#L266)), but do not rely on that. If Lexe's answer to the submit
   itself is uncertain it says so and exits 1.
 - `payments` only reads: it syncs the wallet's payment list and prints it. It never prints a preimage. Use it to see
   that a receive landed (`inbound`, `succeeded`) and what it cost.
