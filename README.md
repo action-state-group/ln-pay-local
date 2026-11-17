@@ -8,7 +8,7 @@ payment on one machine; it is also a usable example of the Lexe Rust SDK.
 > directory holds the wallet's recovery seed in `seedphrase.txt`: back it up, never commit it, never share it.
 
 ```text
-ln-pay-local init    --wallet <dir>                          make a new wallet in an empty directory
+ln-pay-local init    --wallet <dir>                          make a new wallet (or finish provisioning one)
 ln-pay-local balance --wallet <dir>                          spendable Lightning balance, in msat
 ln-pay-local invoice <msat> --wallet <dir>                   an invoice for exactly <msat>, to receive a payment
 ln-pay-local pay <bolt11> --wallet <dir> [--max-fee-msat <n>]  pay an invoice (default fee cap: 1000 msat)
@@ -25,12 +25,16 @@ $ ln-pay-local pay lnbc2890p1... --wallet ~/wallets/buyer
 
 ## What it does and does not do
 
-- `init` is the only command that creates a wallet, and only in a directory that holds none. The SDK writes the
-  seed (mode 0600); the program never prints, copies or logs it. Every other command opens an existing wallet and
-  refuses a directory without `seedphrase.txt`, so a wrong path never makes a new wallet.
-- `pay` asks Lexe for the route first and refuses a fee over `--max-fee-msat`, then pays, then waits (up to 90 s)
-  for the payment to settle and reports `succeeded`, `failed` or `pending`. If Lexe's answer to the submit is
-  uncertain it says so: check the wallet before paying again.
+- `init` is the only command that creates a wallet. With no seed in the directory it makes one (the SDK writes the
+  seed, mode 0600; the program never prints, copies or logs it) and provisions it with Lexe. With a seed already
+  there it keeps that seed and only repeats the provisioning, which the SDK makes idempotent, so an `init` that was
+  cut short can be run again. Every other command opens an existing wallet and refuses a directory without
+  `seedphrase.txt`, so a wrong path never makes a new wallet.
+- `pay` asks Lexe for the route first and refuses a route whose amount is not exactly the invoice's or whose fee is
+  over `--max-fee-msat`, then pays and waits (up to 90 s) for that payment to settle. It reports `succeeded` or
+  `failed`; a payment that was submitted but not seen to settle in time is reported `pending` with its
+  `payment_hash`: check the wallet before paying again. If Lexe's answer to the submit itself is uncertain it says
+  so and exits 1.
 - A wallet directory is locked while a command runs (`wallet.lock`); a second process on the same directory is
   refused. Lexe's local cache is not a multi-process ledger, so do not point two programs at one wallet.
 - It is mainnet only and keeps no state of its own beyond what the Lexe SDK writes in the wallet directory.

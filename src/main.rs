@@ -10,23 +10,23 @@
 //!
 //! Each command prints one JSON object and exits 0, or prints `{"error": "..."}` on stderr and exits 1.
 //! A wallet directory is one the Lexe SDK (and `mesh-wallet-lexe`) already keeps: it holds `seedphrase.txt`.
-//! Only `init` creates a wallet, and only in a directory that holds none: the SDK writes the seed file (mode 0600)
-//! and this program never prints, copies or logs it. Every other command opens an existing wallet and refuses a
-//! directory without one, so a wrong path never provisions a wallet. Mainnet only, real money.
+//! Only `init` creates a wallet, and only when the directory holds no seed: the SDK writes the seed file
+//! (mode 0600) and this program never prints, copies or logs it. `init` on a directory that already holds a seed
+//! never replaces it; it only repeats the (idempotent) provisioning, so an interrupted `init` can be finished.
+//! Every other command opens an existing wallet and refuses a directory without one, so a wrong path never
+//! provisions a wallet. Mainnet only, real money.
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use lexe::config::WalletEnvConfig;
 use lexe::types::auth::{CredentialsRef, RootSeed};
 use lexe::types::bitcoin::Amount;
 use lexe::types::command::CreateInvoiceRequest;
-use lexe::types::payment::{
-    PaymentDirection, PaymentFilter, PaymentHash, PaymentKind, PaymentStatus,
-};
+use lexe::types::payment::{PaymentCreatedIndex, PaymentKind, PaymentStatus};
 use lexe::wallet::LexeWallet;
 use lexe_api_core::def::UserNodeRunApi;
 use lexe_api_core::models::command::{PayInvoicePreflightRequest, PayInvoiceRequest};
@@ -35,15 +35,29 @@ use lexe_api_core::models::command::{PayInvoicePreflightRequest, PayInvoiceReque
 const INVOICE_EXPIRY_SECS: u32 = 3600;
 /// The most a payment's fee may be unless the caller says otherwise (the demo's own cap).
 const DEFAULT_MAX_FEE_MSAT: u64 = 1000;
-/// How long `pay` waits for the payment to settle; Lexe is polled, not pushed, so keep the pace gentle.
+/// How long `pay` waits for the payment to settle before it reports `pending`.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(90);
-const POLL_EVERY: Duration = Duration::from_secs(2);
 
 struct Opened {
     wallet: LexeWallet,
     // Lexe's local cache is not a multi-process ledger: hold the directory's lock (the same file the
     // mesh-llm wallet plugin takes) for as long as the wallet is open.
     _lock: std::fs::File,
+}
+
+/// Take the directory's exclusive lock, creating the lock file. The directory must exist.
+fn lock(dir: &Path) -> Result<std::fs::File> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join("wallet.lock"))
+        .context("could not open the wallet lock")?;
+    lock.try_lock_exclusive().context(
+        "the wallet is open in another process (a running mesh-llm node, or another command)",
+    )?;
+    Ok(lock)
 }
 
 fn open(dir: &Path) -> Result<Opened> {
@@ -58,16 +72,7 @@ fn open(dir: &Path) -> Result<Opened> {
         "no wallet in {}: this program opens an existing wallet and never creates one",
         dir.display()
     );
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(dir.join("wallet.lock"))
-        .context("could not open the wallet lock")?;
-    lock.try_lock_exclusive().context(
-        "the wallet is open in another process (a running mesh-llm node, or another command)",
-    )?;
+    let lock = lock(dir)?;
     let seed = RootSeed::read_from_path(&seed_path)
         .map_err(|_| anyhow::anyhow!("could not read the wallet seed"))?
         .context("the wallet seed file is empty")?;
@@ -88,15 +93,11 @@ fn load(seed: &RootSeed, dir: &Path) -> Result<LexeWallet> {
     .map_err(|_| anyhow::anyhow!("could not load the Lexe wallet"))
 }
 
-/// Make a new wallet in a directory that holds none, and provision it with Lexe. The seed is written by the SDK and
-/// is never printed: back the directory up, it is the only recovery material.
+/// Make a wallet in a directory that holds none and provision it with Lexe. With a seed already there it keeps the
+/// seed and only repeats the provisioning, which the SDK makes idempotent: that finishes an `init` that was cut
+/// short. The seed is written by the SDK and is never printed: back the directory up, it is the only recovery
+/// material.
 async fn init(dir: &Path) -> Result<String> {
-    let seed_path = dir.join("seedphrase.txt");
-    ensure!(
-        !seed_path.exists(),
-        "a wallet already exists in {}: not touching it",
-        dir.display()
-    );
     std::fs::create_dir_all(dir).context("could not create the wallet directory")?;
     #[cfg(unix)]
     {
@@ -104,27 +105,40 @@ async fn init(dir: &Path) -> Result<String> {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .context("could not restrict the wallet directory")?;
     }
-    let seed = RootSeed::generate();
-    seed.write_to_path(&seed_path)
-        .map_err(|_| anyhow::anyhow!("could not write the wallet seed"))?;
-    OpenOptions::new()
-        .write(true)
-        .open(&seed_path)?
-        .sync_all()?;
+    let _lock = lock(dir)?;
+    let seed_path = dir.join("seedphrase.txt");
+    let created = !seed_path.exists();
+    let seed = if created {
+        let seed = RootSeed::generate();
+        seed.write_to_path(&seed_path)
+            .map_err(|_| anyhow::anyhow!("could not write the wallet seed"))?;
+        OpenOptions::new()
+            .write(true)
+            .open(&seed_path)?
+            .sync_all()?;
+        seed
+    } else {
+        RootSeed::read_from_path(&seed_path)
+            .map_err(|_| anyhow::anyhow!("could not read the wallet seed"))?
+            .context("the wallet seed file is empty")?
+    };
     let wallet = load(&seed, dir)?;
-    wallet.signup(&seed, None).await.map_err(|_| anyhow::anyhow!("Lexe wallet provisioning failed (the wallet seed is kept: run init again is refused, open it with balance)"))?;
+    wallet.signup(&seed, None).await.map_err(|_| {
+        anyhow::anyhow!(
+            "Lexe wallet provisioning failed; the seed is kept, run init again to retry"
+        )
+    })?;
     Ok(format!(
-        "{{\"initialized\": true, \"user_pk\": \"{}\"}}",
+        "{{\"initialized\": true, \"created\": {created}, \"user_pk\": \"{}\"}}",
         wallet.user_config().user_pk
     ))
 }
 
 async fn balance(dir: &Path) -> Result<String> {
     let o = open(dir)?;
-    let info =
-        o.wallet.node_info().await.map_err(|_| {
-            anyhow::anyhow!("Lexe balance query failed (is the wallet provisioned?)")
-        })?;
+    let info = o.wallet.node_info().await.map_err(|_| {
+        anyhow::anyhow!("Lexe balance query failed (is the wallet provisioned? try init)")
+    })?;
     Ok(format!(
         "{{\"spendable_msat\": {}}}",
         info.lightning_sendable_balance.msat()
@@ -145,9 +159,29 @@ async fn invoice(dir: &Path, amount_msat: u64) -> Result<String> {
         .await
         .map_err(|_| anyhow::anyhow!("Lexe invoice creation failed"))?;
     Ok(format!(
-        "{{\"invoice\": \"{}\", \"amount_msat\": {}}}",
-        made.invoice, amount_msat
+        "{{\"invoice\": \"{}\", \"amount_msat\": {amount_msat}}}",
+        made.invoice
     ))
+}
+
+/// The preflighted route may be refused: it must carry exactly the invoice's amount (Lexe may raise it to reach an
+/// intermediate hop's minimum) and its fee must be within the cap.
+fn check_route(
+    invoice_msat: Option<u64>,
+    route_amount_msat: u64,
+    route_fee_msat: u64,
+    max_fee_msat: u64,
+) -> Result<()> {
+    let stated = invoice_msat.context("the invoice states no amount: not paying it")?;
+    ensure!(
+        route_amount_msat == stated,
+        "the route would send {route_amount_msat} msat for an invoice of {stated} msat: not paying it"
+    );
+    ensure!(
+        route_fee_msat <= max_fee_msat,
+        "the fee {route_fee_msat} msat is over the allowed {max_fee_msat}"
+    );
+    Ok(())
 }
 
 async fn pay(dir: &Path, bolt11: &str, max_fee_msat: u64) -> Result<String> {
@@ -169,13 +203,16 @@ async fn pay(dir: &Path, bolt11: &str, max_fee_msat: u64) -> Result<String> {
                 "Lexe payment preflight failed (own invoice, already paid, no route or no balance)"
             )
         })?;
-    ensure!(
-        route.fees.msat() <= max_fee_msat,
-        "the fee {} msat is over the allowed {max_fee_msat}",
-        route.fees.msat()
-    );
+    check_route(
+        parsed.amount().map(|a| a.msat()),
+        route.amount.msat(),
+        route.fees.msat(),
+        max_fee_msat,
+    )?;
     let amount = route.amount.msat();
-    o.wallet
+    let hash = parsed.payment_hash().to_string();
+    let submitted = o
+        .wallet
         .node_client()
         .pay_invoice(PayInvoiceRequest {
             invoice: parsed.clone(),
@@ -189,46 +226,26 @@ async fn pay(dir: &Path, bolt11: &str, max_fee_msat: u64) -> Result<String> {
         .map_err(|_| {
             anyhow::anyhow!("Lexe payment outcome uncertain: check the wallet before paying again")
         })?;
-    let hash: PaymentHash = parsed
-        .payment_hash()
-        .to_string()
-        .parse()
-        .context("invalid payment hash")?;
-    let started = Instant::now();
-    loop {
-        o.wallet
-            .sync_payments()
-            .await
-            .map_err(|_| anyhow::anyhow!("Lexe payment synchronization failed"))?;
-        let listed = o
-            .wallet
-            .list_payments(&PaymentFilter::All, None, Some(50), None)
-            .map_err(|_| anyhow::anyhow!("Lexe payment query failed"))?;
-        if let Some(p) = listed
-            .payments
-            .into_iter()
-            .find(|p| p.hash == Some(hash) && p.direction == PaymentDirection::Outbound)
-        {
-            let status = match p.status {
+    // From here the payment is submitted: whatever goes wrong while watching it is `pending` with its hash, never a
+    // plain error, so a caller cannot read "not paid" into "could not look".
+    let index = PaymentCreatedIndex {
+        created_at: submitted.created_at,
+        id: parsed.payment_id(),
+    };
+    let (status, fee) = match o.wallet.wait_for_payment(index, Some(SETTLE_TIMEOUT)).await {
+        Ok(p) => (
+            match p.status {
                 PaymentStatus::Completed => "succeeded",
                 PaymentStatus::Failed => "failed",
                 PaymentStatus::Pending => "pending",
-            };
-            if status != "pending" || started.elapsed() > SETTLE_TIMEOUT {
-                return Ok(format!(
-                    "{{\"status\": \"{status}\", \"amount_msat\": {}, \"fee_msat\": {}, \"payment_hash\": \"{hash}\"}}",
-                    p.amount.map_or(amount, |a| a.msat()),
-                    p.fees.msat()
-                ));
-            }
-        } else if started.elapsed() > SETTLE_TIMEOUT {
-            bail!(
-                "the payment is not in the wallet's list after {} s: check the wallet",
-                SETTLE_TIMEOUT.as_secs()
-            );
-        }
-        tokio::time::sleep(POLL_EVERY).await;
-    }
+            },
+            p.fees.msat(),
+        ),
+        Err(_) => ("pending", route.fees.msat()),
+    };
+    Ok(format!(
+        "{{\"status\": \"{status}\", \"amount_msat\": {amount}, \"fee_msat\": {fee}, \"payment_hash\": \"{hash}\"}}"
+    ))
 }
 
 fn usage() -> anyhow::Error {
@@ -237,13 +254,32 @@ fn usage() -> anyhow::Error {
     )
 }
 
+/// A JSON string literal for `s` (quotes, backslashes and control characters escaped as JSON requires).
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args).await {
         Ok(out) => println!("{out}"),
         Err(e) => {
-            eprintln!("{{\"error\": {:?}}}", format!("{e:#}"));
+            eprintln!("{{\"error\": {}}}", json_string(&format!("{e:#}")));
             std::process::exit(1);
         }
     }
@@ -293,10 +329,7 @@ mod tests {
         let empty = temp("empty");
         std::fs::create_dir_all(&empty).unwrap();
         let err = balance(&empty).await.unwrap_err().to_string();
-        assert!(
-            err.contains("never creates one") || err.contains("existing wallet"),
-            "{err}"
-        );
+        assert!(err.contains("never creates one"), "{err}");
         assert_eq!(
             std::fs::read_dir(&empty).unwrap().count(),
             0,
@@ -306,17 +339,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_refuses_a_directory_that_already_holds_a_wallet() {
+    async fn init_never_replaces_an_existing_seed() {
         let dir = temp("existing");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("seedphrase.txt"), b"placeholder").unwrap();
-        let err = init(&dir).await.unwrap_err().to_string();
-        assert!(err.contains("already exists"), "{err}");
+        // The placeholder is not a seed the SDK reads, so init fails; it must not have replaced it.
+        assert!(init(&dir).await.is_err());
         assert_eq!(
             std::fs::read(dir.join("seedphrase.txt")).unwrap(),
             b"placeholder"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_second_process_on_one_wallet_is_refused() {
+        let dir = temp("locked");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = lock(&dir).unwrap();
+        let err = format!("{:#}", lock(&dir).unwrap_err());
+        assert!(err.contains("open in another process"), "{err}");
+        drop(first);
+        assert!(lock(&dir).is_ok(), "the lock is released when dropped");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_route_must_match_the_invoice_and_the_fee_cap() {
+        assert!(check_route(Some(289), 289, 3, 1000).is_ok());
+        let raised = check_route(Some(289), 300, 0, 1000)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            raised.contains("300 msat for an invoice of 289"),
+            "{raised}"
+        );
+        let dear = check_route(Some(289), 289, 1001, 1000)
+            .unwrap_err()
+            .to_string();
+        assert!(dear.contains("over the allowed 1000"), "{dear}");
+        let open = check_route(None, 289, 0, 1000).unwrap_err().to_string();
+        assert!(open.contains("states no amount"), "{open}");
+    }
+
+    #[test]
+    fn error_strings_are_valid_json() {
+        assert_eq!(json_string("plain"), "\"plain\"");
+        assert_eq!(json_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(json_string("x\u{1b}y\n"), "\"x\\u001by\\n\"");
     }
 
     #[tokio::test]
