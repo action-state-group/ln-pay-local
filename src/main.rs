@@ -150,10 +150,7 @@ async fn balance(dir: &Path) -> Result<String> {
 
 /// `spendable_msat` is Lexe's sendable balance (first, so existing readers keep working); `lightning_balance_msat`
 /// is Lexe's total Lightning balance over all channels, which also counts funds a receive-only wallet cannot send yet.
-fn balance_json(
-    spendable_msat: impl std::fmt::Display,
-    lightning_balance_msat: impl std::fmt::Display,
-) -> String {
+fn balance_json(spendable_msat: u64, lightning_balance_msat: u64) -> String {
     format!(
         "{{\"spendable_msat\": {spendable_msat}, \"lightning_balance_msat\": {lightning_balance_msat}}}"
     )
