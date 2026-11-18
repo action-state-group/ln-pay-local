@@ -142,10 +142,18 @@ async fn balance(dir: &Path) -> Result<String> {
     let info = o.wallet.node_info().await.map_err(|_| {
         anyhow::anyhow!("Lexe balance query failed (is the wallet provisioned? try init)")
     })?;
-    Ok(format!(
-        "{{\"spendable_msat\": {}}}",
-        info.lightning_sendable_balance.msat()
+    Ok(balance_json(
+        info.lightning_sendable_balance.msat(),
+        info.lightning_balance.msat(),
     ))
+}
+
+/// `spendable_msat` is Lexe's sendable balance (first, so existing readers keep working); `lightning_balance_msat`
+/// is Lexe's total Lightning balance over all channels, which also counts funds a receive-only wallet cannot send yet.
+fn balance_json(spendable_msat: u64, lightning_balance_msat: u64) -> String {
+    format!(
+        "{{\"spendable_msat\": {spendable_msat}, \"lightning_balance_msat\": {lightning_balance_msat}}}"
+    )
 }
 
 /// The wallet's newest payments, read-only: direction, status, amount, fee, time and payment hash. The preimage
@@ -393,6 +401,14 @@ async fn run(args: &[String]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn balance_json_keeps_spendable_first_and_adds_total() {
+        assert_eq!(
+            balance_json(0u64, 189u64),
+            r#"{"spendable_msat": 0, "lightning_balance_msat": 189}"#
+        );
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ln-pay-local-{name}-{}", std::process::id()));

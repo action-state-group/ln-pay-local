@@ -12,7 +12,7 @@ payment on one machine; it is also a usable example of the Lexe Rust SDK.
 
 ```text
 ln-pay-local init    --wallet <dir>                          make a new wallet (or finish provisioning one)
-ln-pay-local balance --wallet <dir>                          spendable Lightning balance, in msat
+ln-pay-local balance --wallet <dir>                          `spendable_msat` (sendable) and `lightning_balance_msat` (total Lightning balance), in msat
 ln-pay-local payments --wallet <dir> [--limit <n>]            the newest payments (read-only; default 20, at most 200; `more` is true if older ones exist)
 ln-pay-local invoice <msat> --wallet <dir>                   an invoice for exactly <msat>, to receive a payment
 ln-pay-local pay <bolt11> --wallet <dir> [--max-fee-msat <n>]  pay an invoice (default fee cap: 1000 msat)
